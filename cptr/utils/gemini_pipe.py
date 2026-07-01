@@ -429,7 +429,13 @@ async def stream_gemini(
         model=form_data.model, contents=contents, config=config
     )
 
-    usage_emitted = False
+    # Gemini streams usage_metadata cumulatively on EVERY chunk. The agentic loop
+    # treats a "usage" event with no pending tool calls as end-of-turn (save +
+    # return), so emitting it per chunk truncates plain text replies to the first
+    # token. Track the latest usage and emit it exactly once, after the stream —
+    # matching the anthropic/openai adapters.
+    input_tokens = 0
+    output_tokens = 0
     async for chunk in stream:
         candidates = getattr(chunk, "candidates", None) or []
         if candidates:
@@ -467,15 +473,11 @@ async def stream_gemini(
 
         usage = getattr(chunk, "usage_metadata", None)
         if usage is not None:
-            usage_emitted = True
-            yield {
-                "type": "usage",
-                "input_tokens": getattr(usage, "prompt_token_count", 0) or 0,
-                "output_tokens": getattr(usage, "candidates_token_count", 0) or 0,
-            }
+            # Values are cumulative; keep the most recent non-zero readings.
+            input_tokens = getattr(usage, "prompt_token_count", 0) or input_tokens
+            output_tokens = getattr(usage, "candidates_token_count", 0) or output_tokens
 
-    if not usage_emitted:
-        yield {"type": "usage", "input_tokens": 0, "output_tokens": 0}
+    yield {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens}
     yield {"type": "done"}
 
 
