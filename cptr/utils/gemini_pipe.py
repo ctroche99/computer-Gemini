@@ -115,30 +115,67 @@ def build_client(connection: dict):
     return genai.Client(api_key=secret)
 
 
-def _resolve_vertex_credentials(secret: str):
-    """Turn a pasted service-account JSON string into credentials.
+def _looks_like_sa_json(value: str) -> bool:
+    """Heuristic: does this string look like service-account key JSON?"""
+    return value.startswith("{") or (
+        '"private_key"' in value
+        or '"client_email"' in value
+        or "service_account" in value
+    )
 
-    Accepts the full JSON key contents. Empty → rely on ambient Application
-    Default Credentials (e.g. GCE/GKE metadata server). A filesystem path is
-    also honoured by exporting GOOGLE_APPLICATION_CREDENTIALS.
+
+def _resolve_vertex_credentials(secret: str):
+    """Turn a pasted service-account key into credentials.
+
+    Accepts the full JSON key contents (preferred) or a filesystem path to a JSON
+    key file. Empty → rely on ambient Application Default Credentials (e.g. the
+    GCE/GKE metadata server).
+
+    Credentials are detected by *content*, not just a leading brace, so a paste
+    that dropped its opening ``{`` still parses instead of being mistaken for a
+    file path. A secret blob is NEVER written to GOOGLE_APPLICATION_CREDENTIALS,
+    so it can never be echoed back through an ADC "file not found" error.
     """
     if not secret:
         return None
 
     stripped = secret.strip()
-    if stripped.startswith("{"):
+
+    if _looks_like_sa_json(stripped):
         from google.oauth2 import service_account
 
-        info = json.loads(stripped)
+        try:
+            info = json.loads(stripped)
+        except json.JSONDecodeError:
+            # Tolerate a paste that lost its outer braces; validate the retry.
+            candidate = stripped
+            if not candidate.startswith("{"):
+                candidate = "{" + candidate
+            if not candidate.rstrip().endswith("}"):
+                candidate = candidate + "}"
+            try:
+                info = json.loads(candidate)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    "Service account credentials are not valid JSON. Paste the "
+                    "complete key contents, including the surrounding { }."
+                ) from e
         return service_account.Credentials.from_service_account_info(
             info, scopes=_VERTEX_SCOPES
         )
 
-    # Treat as a path to a JSON key file for ADC.
+    # Not JSON → only accept a genuine single-line path to an existing file.
     import os
 
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = stripped
-    return None
+    if "\n" not in stripped and os.path.isfile(stripped):
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = stripped
+        return None
+
+    raise ValueError(
+        "Service account credentials could not be read: value is neither valid "
+        "JSON nor a path to an existing key file. Paste the full service-account "
+        "JSON (including the surrounding { }), or provide a valid file path."
+    )
 
 
 # ── Message / tool conversion ────────────────────────────────
@@ -152,6 +189,23 @@ def _extract_system(messages: list[dict]) -> str:
             if isinstance(content, str) and content:
                 parts.append(content)
     return "\n\n".join(parts)
+
+
+def _decode_thought_signature(fc_id: str) -> bytes | None:
+    """Decode a Gemini 3 thought_signature stashed in a tool_call's fc_id.
+
+    We store signatures as ``vsig_<standard-base64>``. Returns the raw bytes, or
+    None when the field holds something else (empty, or a foreign id such as an
+    OpenAI ``fc_...`` from a model switched mid-chat).
+    """
+    if not isinstance(fc_id, str) or not fc_id.startswith("vsig_"):
+        return None
+    try:
+        import base64
+
+        return base64.standard_b64decode(fc_id[len("vsig_") :])
+    except Exception:
+        return None
 
 
 def _call_id_to_name(messages: list[dict]) -> dict[str, str]:
@@ -241,9 +295,22 @@ def to_genai_contents(messages: list[dict], types) -> list:
                     args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                 except json.JSONDecodeError:
                     args = {}
-                parts.append(
-                    types.Part.from_function_call(name=fn.get("name", ""), args=args or {})
-                )
+                # Restore the Gemini 3 thought_signature captured in fc_id (if any)
+                # so the replayed functionCall part is accepted; plain call otherwise.
+                sig = _decode_thought_signature(tc.get("fc_id", ""))
+                if sig is not None:
+                    parts.append(
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                name=fn.get("name", ""), args=args or {}
+                            ),
+                            thought_signature=sig,
+                        )
+                    )
+                else:
+                    parts.append(
+                        types.Part.from_function_call(name=fn.get("name", ""), args=args or {})
+                    )
             contents.append(types.Content(role="model", parts=parts))
             continue
 
@@ -371,9 +438,21 @@ async def stream_gemini(
                 fn = getattr(part, "function_call", None)
                 if fn is not None:
                     args = dict(getattr(fn, "args", None) or {})
+                    # Gemini 3 attaches a thought_signature (bytes) to each
+                    # functionCall part; it MUST be echoed back when the call is
+                    # replayed in history or the next turn is rejected with 400.
+                    # Stash it (base64) in the event "id", which the agentic loop
+                    # persists as the tool_call's fc_id — so it round-trips.
+                    sig = getattr(part, "thought_signature", None)
+                    event_id = ""
+                    if sig:
+                        import base64
+
+                        event_id = "vsig_" + base64.standard_b64encode(sig).decode()
                     yield {
                         "type": "tool_call",
                         "call_id": f"call_{uuid.uuid4().hex[:24]}",
+                        "id": event_id,
                         "name": fn.name,
                         "arguments": args,
                     }
@@ -450,7 +529,8 @@ async def list_vertex_models(connection: dict) -> list[str]:
         if models:
             return sorted(set(models))
     except Exception as e:  # discovery is best-effort
-        logger.warning("[vertex] model discovery failed: %r", e)
+        # Log only the exception type — messages can embed credential text.
+        logger.warning("[vertex] model discovery failed: %s", type(e).__name__)
 
     return list(_DEFAULT_MODELS)
 

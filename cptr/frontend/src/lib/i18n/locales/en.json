@@ -332,7 +332,7 @@
 	"admin.vertex.location": "Location",
 	"admin.vertex.locationHint": "e.g. global, us-central1, europe-west4.",
 	"admin.vertex.credentials": "Service account JSON",
-	"admin.vertex.credentialsHint": "Paste the full service-account key JSON. Stored encrypted. Leave blank to use ambient Application Default Credentials.",
+	"admin.vertex.credentialsHint": "Paste the complete service-account key JSON, including the surrounding { }. Stored encrypted. Leave blank to use ambient Application Default Credentials.",
 	"admin.vertex.apiKey": "API key",
 	"admin.vertex.apiKeyHint": "Google Generative Language API key (from Google AI Studio). Stored encrypted.",
 	"admin.vertex.secretSaved": "•••••••• (saved — leave blank to keep)",
