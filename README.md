@@ -168,6 +168,56 @@ If you bind-mount a host directory to `/data`, make sure that directory is writa
 
 The `:dev` image is also available and tracks the `main` branch.
 
+### Build this fork (with the Vertex / Gemini pipe)
+
+The official `ghcr.io/open-webui/computer` image does **not** include the
+Vertex / Gemini pipe added in this fork. To use it in Docker, build the image
+from this repository. The bundled `Dockerfile` installs the `[all]` extras,
+which now include `google-genai`, so no extra steps are required — the Vertex
+support ships in the image automatically.
+
+Build the image:
+
+```bash
+# from the repository root
+docker build -t cptr-vertex:latest .
+```
+
+Run it exactly like the official image, just with your local tag:
+
+```bash
+docker run --rm -it \
+  -p 8000:8000 \
+  -v cptr-data:/data \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  cptr-vertex:latest
+```
+
+Then open the printed `http://localhost:8000/?token=...` URL and configure the
+integration under **Settings ▸ Vertex**:
+
+1. Toggle **Enable Vertex pipe** on.
+2. Choose **Vertex AI (service account)** and enter your **Project ID** and
+   **Location** (e.g. `us-central1`, or `global`).
+3. Paste your service-account key JSON into **Service account JSON**. It is
+   stored encrypted in `/data`. (Alternatively pick **Google API key** auth and
+   paste a Google AI Studio key.)
+4. Set the **Models** you want (e.g. `gemini-2.5-pro, gemini-2.5-flash`), then
+   **Save** and click **Verify**.
+
+Gemini models then appear as `vertex/<model>` and can be selected for chats and
+the agentic loop just like any other connection.
+
+> **Credentials tip:** pasting the service-account JSON into the UI needs no
+> extra mounts. If you prefer Application Default Credentials instead, mount the
+> key file and point the container at it, e.g.
+> `-v /path/to/key.json:/keys/vertex.json:ro -e GOOGLE_APPLICATION_CREDENTIALS=/keys/vertex.json`,
+> and leave the **Service account JSON** field blank.
+
+Because all Vertex-specific code lives in additive files, you can keep pulling
+updates from upstream `computer` and rebuild the image to stay current.
+
 ## Security model
 
 Open WebUI Computer is designed as **your computer, served to you**. Once authenticated, a user has full access to the host filesystem and shell, equivalent to an SSH session. There is no path sandboxing and no per-user isolation.
