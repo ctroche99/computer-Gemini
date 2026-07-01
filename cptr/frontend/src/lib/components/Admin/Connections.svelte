@@ -17,7 +17,10 @@
 
 	async function load() {
 		try {
-			connections = await listConnections();
+			// Vertex connections are managed in the dedicated Vertex tab; hide them
+			// here so they aren't edited with the OpenAI/Anthropic-only modal (which
+			// would coerce provider and corrupt the connection).
+			connections = (await listConnections()).filter((c) => c.provider !== 'vertex');
 		} catch {
 			toast.error($t('connections.loadError'));
 		} finally {
