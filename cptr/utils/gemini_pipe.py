@@ -35,12 +35,17 @@ from ``connection["_api_key_plain"]`` when present, else ``connection["api_key"]
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Retry transient stream failures before the first event, mirroring the
+# anthropic/openai adapters in cptr.utils.ai.
+_STREAM_RETRY_ATTEMPTS = 3
 
 # Scope required for Vertex AI when building credentials from a service account.
 _VERTEX_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
@@ -179,16 +184,6 @@ def _resolve_vertex_credentials(secret: str):
 
 
 # ── Message / tool conversion ────────────────────────────────
-
-
-def _extract_system(messages: list[dict]) -> str:
-    parts: list[str] = []
-    for m in messages:
-        if m.get("role") == "system":
-            content = m.get("content", "")
-            if isinstance(content, str) and content:
-                parts.append(content)
-    return "\n\n".join(parts)
 
 
 def _decode_thought_signature(fc_id: str) -> bytes | None:
@@ -386,15 +381,6 @@ def _build_config(connection: dict, system: str, tools: list, request_params: di
     return types.GenerateContentConfig(**config_kwargs)
 
 
-def _reasoning_item(text: str) -> dict:
-    return {
-        "type": "reasoning",
-        "id": f"rs_{uuid.uuid4().hex}",
-        "status": "completed",
-        "content": [{"type": "text", "text": text}],
-    }
-
-
 # ── Streaming (agentic loop) ─────────────────────────────────
 
 
@@ -410,7 +396,11 @@ async def stream_gemini(
     ``text_delta``, ``tool_call``, ``output`` (reasoning), ``usage``, ``done``.
     ``form_data`` is a ``cptr.utils.ai.ChatCompletionForm``.
     """
+    import base64
+
     _, types = _import_genai()
+    from google.genai import errors as genai_errors
+
     client = build_client(connection)
 
     contents = to_genai_contents(form_data.messages, types)
@@ -425,60 +415,131 @@ async def stream_gemini(
         len(form_data.tools),
     )
 
-    stream = await client.aio.models.generate_content_stream(
-        model=form_data.model, contents=contents, config=config
-    )
+    emitted = False
+    for attempt in range(_STREAM_RETRY_ATTEMPTS):
+        try:
+            # Gemini streams usage_metadata cumulatively on EVERY chunk. The
+            # agentic loop treats a "usage" event with no pending tool calls as
+            # end-of-turn (save + return), so it must be emitted exactly once,
+            # after the stream — matching the anthropic/openai adapters.
+            input_tokens = 0
+            output_tokens = 0
+            # Accumulate streamed "thought" text into a single reasoning item
+            # (stable id), like stream_openai_completions, instead of emitting a
+            # new fragment per chunk.
+            reasoning_buffer = ""
+            reasoning_id: str | None = None
 
-    # Gemini streams usage_metadata cumulatively on EVERY chunk. The agentic loop
-    # treats a "usage" event with no pending tool calls as end-of-turn (save +
-    # return), so emitting it per chunk truncates plain text replies to the first
-    # token. Track the latest usage and emit it exactly once, after the stream —
-    # matching the anthropic/openai adapters.
-    input_tokens = 0
-    output_tokens = 0
-    async for chunk in stream:
-        candidates = getattr(chunk, "candidates", None) or []
-        if candidates:
-            content = getattr(candidates[0], "content", None)
-            for part in (getattr(content, "parts", None) or []):
-                fn = getattr(part, "function_call", None)
-                if fn is not None:
-                    args = dict(getattr(fn, "args", None) or {})
-                    # Gemini 3 attaches a thought_signature (bytes) to each
-                    # functionCall part; it MUST be echoed back when the call is
-                    # replayed in history or the next turn is rejected with 400.
-                    # Stash it (base64) in the event "id", which the agentic loop
-                    # persists as the tool_call's fc_id — so it round-trips.
-                    sig = getattr(part, "thought_signature", None)
-                    event_id = ""
-                    if sig:
-                        import base64
+            def complete_reasoning() -> dict | None:
+                nonlocal reasoning_buffer, reasoning_id
+                if reasoning_id is None:
+                    return None
+                item = {
+                    "type": "reasoning",
+                    "id": reasoning_id,
+                    "status": "completed",
+                    "content": [{"type": "text", "text": reasoning_buffer}],
+                }
+                reasoning_id = None
+                reasoning_buffer = ""
+                return item
 
-                        event_id = "vsig_" + base64.standard_b64encode(sig).decode()
-                    yield {
-                        "type": "tool_call",
-                        "call_id": f"call_{uuid.uuid4().hex[:24]}",
-                        "id": event_id,
-                        "name": fn.name,
-                        "arguments": args,
-                    }
-                    continue
+            stream = await client.aio.models.generate_content_stream(
+                model=form_data.model, contents=contents, config=config
+            )
 
-                text = getattr(part, "text", None)
-                if text:
-                    if getattr(part, "thought", False):
-                        yield {"type": "output", "item": _reasoning_item(text)}
-                    else:
-                        yield {"type": "text_delta", "content": text}
+            async for chunk in stream:
+                candidates = getattr(chunk, "candidates", None) or []
+                if candidates:
+                    content = getattr(candidates[0], "content", None)
+                    for part in (getattr(content, "parts", None) or []):
+                        fn = getattr(part, "function_call", None)
+                        if fn is not None:
+                            done_item = complete_reasoning()
+                            if done_item is not None:
+                                emitted = True
+                                yield {"type": "output", "item": done_item}
+                            args = dict(getattr(fn, "args", None) or {})
+                            # Gemini 3 attaches a thought_signature (bytes) to
+                            # each functionCall part; it MUST be echoed back when
+                            # the call is replayed in history or the next turn is
+                            # rejected with 400. Stash it (base64) in the event
+                            # "id", which the agentic loop persists as the
+                            # tool_call's fc_id — so it round-trips.
+                            sig = getattr(part, "thought_signature", None)
+                            event_id = ""
+                            if sig:
+                                event_id = "vsig_" + base64.standard_b64encode(sig).decode()
+                            emitted = True
+                            yield {
+                                "type": "tool_call",
+                                "call_id": f"call_{uuid.uuid4().hex[:24]}",
+                                "id": event_id,
+                                "name": fn.name,
+                                "arguments": args,
+                            }
+                            continue
 
-        usage = getattr(chunk, "usage_metadata", None)
-        if usage is not None:
-            # Values are cumulative; keep the most recent non-zero readings.
-            input_tokens = getattr(usage, "prompt_token_count", 0) or input_tokens
-            output_tokens = getattr(usage, "candidates_token_count", 0) or output_tokens
+                        text = getattr(part, "text", None)
+                        if text:
+                            if getattr(part, "thought", False):
+                                if reasoning_id is None:
+                                    reasoning_id = f"rs_{uuid.uuid4().hex}"
+                                reasoning_buffer += text
+                                emitted = True
+                                yield {
+                                    "type": "output",
+                                    "item": {
+                                        "type": "reasoning",
+                                        "id": reasoning_id,
+                                        "status": "in_progress",
+                                        "content": [
+                                            {"type": "text", "text": reasoning_buffer}
+                                        ],
+                                    },
+                                }
+                            else:
+                                done_item = complete_reasoning()
+                                if done_item is not None:
+                                    emitted = True
+                                    yield {"type": "output", "item": done_item}
+                                emitted = True
+                                yield {"type": "text_delta", "content": text}
 
-    yield {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens}
-    yield {"type": "done"}
+                usage = getattr(chunk, "usage_metadata", None)
+                if usage is not None:
+                    # Values are cumulative; keep the most recent non-zero reads.
+                    input_tokens = getattr(usage, "prompt_token_count", 0) or input_tokens
+                    output_tokens = (
+                        getattr(usage, "candidates_token_count", 0) or output_tokens
+                    )
+
+            done_item = complete_reasoning()
+            if done_item is not None:
+                emitted = True
+                yield {"type": "output", "item": done_item}
+            emitted = True
+            yield {
+                "type": "usage",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
+            yield {"type": "done"}
+            return
+        except genai_errors.ClientError:
+            # 4xx (bad request, auth, quota) won't be fixed by retrying — surface it.
+            raise
+        except Exception:
+            if emitted or attempt == _STREAM_RETRY_ATTEMPTS - 1:
+                raise
+            logger.warning(
+                "[stream] vertex transient stream failure before first event; "
+                "retrying (%s/%s)",
+                attempt + 1,
+                _STREAM_RETRY_ATTEMPTS,
+                exc_info=True,
+            )
+            await asyncio.sleep(0.5 * (attempt + 1))
 
 
 # ── Non-streaming (utility tasks: titles, tags, summaries) ───
