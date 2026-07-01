@@ -126,7 +126,19 @@ export interface Connection {
 	base_url: string | null;
 	api_key: string | null;
 	enabled: boolean;
-	data: { models?: string[] };
+	data: {
+		models?: string[];
+		auth_mode?: string;
+		vertex_project?: string;
+		vertex_location?: string;
+	};
+}
+
+/** Extra fields accepted by create/update for the Vertex/Gemini pipe. */
+interface VertexConnectionFields {
+	auth_mode?: string;
+	vertex_project?: string;
+	vertex_location?: string;
 }
 
 export const listConnections = async (): Promise<Connection[]> => {
@@ -134,20 +146,22 @@ export const listConnections = async (): Promise<Connection[]> => {
 	return data.connections;
 };
 
-export const createConnection = (conn: {
-	name: string;
-	provider: string;
-	api_type?: string;
-	prefix_id?: string | null;
-	base_url?: string | null;
-	api_key?: string | null;
-	enabled?: boolean;
-	models?: string[];
-}) => fetchJSON('/api/admin/connections', jsonBody(conn));
+export const createConnection = (
+	conn: {
+		name: string;
+		provider: string;
+		api_type?: string;
+		prefix_id?: string | null;
+		base_url?: string | null;
+		api_key?: string | null;
+		enabled?: boolean;
+		models?: string[];
+	} & VertexConnectionFields
+) => fetchJSON('/api/admin/connections', jsonBody(conn));
 
 export const updateConnection = (
 	id: string,
-	updates: Partial<Omit<Connection, 'id' | 'data'>> & { models?: string[] }
+	updates: Partial<Omit<Connection, 'id' | 'data'>> & { models?: string[] } & VertexConnectionFields
 ) =>
 	fetchJSON(`/api/admin/connections/${id}`, {
 		...jsonBody(updates),

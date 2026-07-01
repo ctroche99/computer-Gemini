@@ -88,12 +88,23 @@ async def chat_completion(
     max_tokens: int = 100,
     api_type: str = "chat_completions",
     request_params: dict | None = None,
+    connection: dict | None = None,
 ) -> str:
     """Simple non-streaming chat completion. Returns the text content.
 
-    Works with Anthropic, OpenAI Chat Completions, and OpenAI Responses API.
-    Useful for lightweight tasks like title/summary generation.
+    Works with Anthropic, OpenAI Chat Completions, OpenAI Responses API, and
+    the Vertex/Gemini pipe. Useful for lightweight tasks like title/summary
+    generation. For the "vertex" provider, pass the connection dict (with the
+    already-decrypted secret) so project/location/auth details are available.
     """
+    if provider == "vertex":
+        from cptr.utils.gemini_pipe import gemini_completion
+
+        conn = {**(connection or {}), "_api_key_plain": api_key}
+        return await gemini_completion(
+            conn, model, messages, system=system, max_tokens=max_tokens
+        )
+
     async with httpx.AsyncClient(timeout=httpx.Timeout(15)) as client:
         if provider == "anthropic":
             body: dict = {

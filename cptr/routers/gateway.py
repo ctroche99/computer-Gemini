@@ -527,6 +527,7 @@ async def _proxy_to_llm(
             model=runtime_model,
             messages=body.messages,
             max_tokens=200,
+            connection=connection,
         )
     except Exception as e:
         logger.warning("[gateway] Utility task LLM call failed: %r", e)
