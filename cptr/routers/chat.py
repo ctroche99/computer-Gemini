@@ -244,6 +244,13 @@ async def _fetch_provider_models(conn: dict) -> list[str]:
                         r.status_code,
                     )
 
+        elif provider == "vertex":
+            from cptr.utils.gemini_pipe import list_vertex_models
+
+            models = await list_vertex_models({**conn, "_api_key_plain": api_key or ""})
+            log.info("Resolved %d vertex/gemini models", len(models))
+            return models
+
         else:
             log.warning("Unknown provider '%s', skipping model auto-discovery", provider)
 
@@ -607,6 +614,7 @@ async def compact_chat(chat_id: str, body: CompactRequest, request: Request):
         api_key,
         runtime_model,
         api_type=api_type,
+        connection=connection,
     )
     await ChatMessage.update(message_id, chat_summary=summary)
 

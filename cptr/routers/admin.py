@@ -241,6 +241,13 @@ async def create_connection(body: CreateConnectionRequest, request: Request):
         "enabled": body.enabled if body.enabled is not None else True,
         "data": {"models": body.models} if body.models else {},
     }
+    for field, key in (
+        (body.auth_mode, "auth_mode"),
+        (body.vertex_project, "vertex_project"),
+        (body.vertex_location, "vertex_location"),
+    ):
+        if field is not None:
+            conn["data"][key] = field
     connections.append(conn)
     await _save_connections(connections)
     invalidate_model_cache(request.app.state)
@@ -275,6 +282,13 @@ async def update_connection(conn_id: str, body: UpdateConnectionRequest, request
     elif "models" in body.model_fields_set:
         # Explicit null → clear whitelist, enable auto-discovery
         conn.get("data", {}).pop("models", None)
+    for field, key in (
+        (body.auth_mode, "auth_mode"),
+        (body.vertex_project, "vertex_project"),
+        (body.vertex_location, "vertex_location"),
+    ):
+        if field is not None:
+            conn.setdefault("data", {})[key] = field
 
     await _save_connections(connections)
     invalidate_model_cache(request.app.state)
@@ -347,6 +361,14 @@ async def verify_connection(conn_id: str, request: Request):
                         {"ok": False, "message": f"API returned {r.status_code}"}, 400
                     )
 
+        elif provider == "vertex":
+            from cptr.utils.gemini_pipe import verify_vertex
+
+            ok, message = await verify_vertex({**conn, "_api_key_plain": api_key or ""})
+            if ok:
+                return {"ok": True, "message": message}
+            return JSONResponse({"ok": False, "message": message}, 400)
+
         else:
             return JSONResponse({"ok": False, "message": f"Unknown provider: {provider}"}, 400)
 
@@ -387,13 +409,17 @@ class ConfigUpdateRequest(BaseModel):
 
 class CreateConnectionRequest(BaseModel):
     name: str
-    provider: str  # "anthropic" | "openai"
+    provider: str  # "anthropic" | "openai" | "vertex"
     api_type: str = "chat_completions"  # "chat_completions" | "responses" (openai only)
     prefix_id: Optional[str] = None  # e.g. "openrouter" → "openrouter/model-id"
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     enabled: Optional[bool] = None  # defaults to True in handler
     models: Optional[list[str]] = None
+    # Vertex/Gemini pipe fields (stored under conn["data"])
+    auth_mode: Optional[str] = None  # "vertex" | "api_key"
+    vertex_project: Optional[str] = None
+    vertex_location: Optional[str] = None
 
 
 class UpdateConnectionRequest(BaseModel):
@@ -405,6 +431,10 @@ class UpdateConnectionRequest(BaseModel):
     api_key: Optional[str] = None
     enabled: Optional[bool] = None
     models: Optional[list[str]] = None
+    # Vertex/Gemini pipe fields (stored under conn["data"])
+    auth_mode: Optional[str] = None
+    vertex_project: Optional[str] = None
+    vertex_location: Optional[str] = None
 
 
 # ── Model config ─────────────────────────────────────────────

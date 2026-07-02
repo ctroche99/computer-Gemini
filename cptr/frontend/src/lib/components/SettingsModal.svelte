@@ -14,6 +14,7 @@
 	import Models from './Admin/Models.svelte';
 	import Messaging from './Admin/Messaging.svelte';
 	import Gateway from './Admin/Gateway.svelte';
+	import VertexPipe from './Admin/VertexPipe.svelte';
 	import AudioSettings from './Admin/AudioSettings.svelte';
 	import Images from './Admin/Images.svelte';
 	import AdminWeb from './Admin/Web.svelte';
@@ -35,6 +36,7 @@
 		| 'models'
 		| 'messaging'
 		| 'gateway'
+		| 'vertex'
 		| 'audio'
 		| 'images'
 		| 'web'
@@ -62,6 +64,7 @@
 		'models',
 		'messaging',
 		'gateway',
+		'vertex',
 		'audio',
 		'images',
 		'web',
@@ -88,6 +91,7 @@
 		{ id: 'models', label: $t('admin.models'), icon: 'cube' },
 		{ id: 'messaging', label: $t('admin.messaging'), icon: 'chat-bubble' },
 		{ id: 'gateway', label: $t('admin.gateway.tab'), icon: 'gateway' },
+		{ id: 'vertex', label: $t('admin.vertex.tab'), icon: 'gateway' },
 		{ id: 'audio', label: $t('admin.audio.title'), icon: 'microphone' },
 		{ id: 'images', label: $t('admin.images.title'), icon: 'image' },
 		{ id: 'web', label: $t('admin.web'), icon: 'globe' },
@@ -196,6 +200,8 @@
 			<Messaging />
 		{:else if activeTab === 'gateway'}
 			<Gateway />
+		{:else if activeTab === 'vertex'}
+			<VertexPipe />
 		{:else if activeTab === 'audio'}
 			<AudioSettings />
 		{:else if activeTab === 'images'}

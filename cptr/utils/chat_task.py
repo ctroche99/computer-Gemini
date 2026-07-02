@@ -1635,6 +1635,7 @@ async def run_chat_task(
                     api_key,
                     model,
                     api_type=api_type,
+                    connection=connection,
                 )
 
                 await ChatMessage.update(summary_message_id, chat_summary=summary)
@@ -1713,7 +1714,15 @@ async def run_chat_task(
                 tools=tools,
             )
 
-            if provider == "anthropic":
+            if provider == "vertex":
+                from cptr.utils.gemini_pipe import stream_gemini
+
+                stream = stream_gemini(
+                    form_data,
+                    {**connection, "_api_key_plain": api_key},
+                    request_params=request_params,
+                )
+            elif provider == "anthropic":
                 stream = stream_anthropic(
                     form_data, base_url, api_key, request_params=request_params
                 )

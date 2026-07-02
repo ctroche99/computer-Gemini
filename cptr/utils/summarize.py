@@ -42,6 +42,7 @@ async def summarize_messages(
     api_key: str,
     model: str,
     api_type: str = "chat_completions",
+    connection: dict | None = None,
 ) -> str:
     """Summarize messages into a compact rolling summary.
 
@@ -81,6 +82,7 @@ async def summarize_messages(
             system=_get_summarize_prompt(),
             max_tokens=1000,
             api_type=api_type,
+            connection=connection,
         )
         logger.info("[summarize] LLM summary: %d chars", len(result))
         return result

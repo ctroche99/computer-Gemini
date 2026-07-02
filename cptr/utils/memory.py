@@ -1515,6 +1515,7 @@ async def run_memory_review(
             system="You are cptr's private memory reviewer. Return only valid JSON.",
             max_tokens=700,
             api_type=model_connection.get("api_type", "chat_completions"),
+            connection=model_connection,
         )
         parsed = extract_json(text)
         if not isinstance(parsed, dict):
